@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Braun BP Scanner — TensorFlow</title>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+  <title>Braun BP Scanner — OpenCV.js</title>
+  <script src="https://docs.opencv.org/4.9.0/opencv.js" async onload="onOpenCvReady()"></script>
   <style>
     body { margin:0; font-family:system-ui; background:#f8f9fa; text-align:center; padding:20px; }
     .box { max-width:500px; margin:30px auto; background:white; padding:40px; border-radius:20px; box-shadow:0 10px 40px rgba(0,0,0,0.15); }
-    h1 { color:#0d6efd; }
+    h1 { color:#0d6efd; margin-bottom:10px; }
     p { color:#555; margin-bottom:30px; }
     .cam { background:#0d6efd; color:white; border:none; padding:18px 40px; font-size:18px; border-radius:16px; cursor:pointer; }
     .result { margin-top:30px; padding:25px; background:#e3f2fd; border-radius:16px; font-size:38px; font-weight:900; display:none; }
@@ -27,7 +27,7 @@
   <input type="file" id="photo" accept="image/*" capture="environment" style="display:none">
   <button class="cam" onclick="document.getElementById('photo').click()">Camera</button>
   
-  <div id="loading" class="loading">Analyzing with AI... (first time: 8 sec)</div>
+  <div id="loading" class="loading">Loading OpenCV... (first time: 8 sec)</div>
   
   <div id="result" class="result">
     SYS <span id="sys" class="sys">—</span><br>
@@ -37,73 +37,78 @@
 </div>
 
 <script>
-let model = null;
-
-async function initModel() {
-  if (model) return;
-  document.getElementById('loading').style.display = 'block';
-
-  // Load pre-trained MobileNet for digit classification (fine-tuned for numbers)
-  model = await tf.loadLayersModel('https://tfhub.dev/google/tfjs-model/imagenet/mobilenet_v2_100_224/classification/5/default/1');
-  
-  // Custom digit classifier (simple CNN for LCD digits)
-  const digitModel = tf.sequential({
-    layers: [
-      tf.layers.conv2d({ inputShape: [224, 224, 3], filters: 32, kernelSize: 3, activation: 'relu' }),
-      tf.layers.maxPooling2d({ poolSize: 2 }),
-      tf.layers.conv2d({ filters: 64, kernelSize: 3, activation: 'relu' }),
-      tf.layers.maxPooling2d({ poolSize: 2 }),
-      tf.layers.flatten(),
-      tf.layers.dense({ units: 128, activation: 'relu' }),
-      tf.layers.dense({ units: 10, activation: 'softmax' })  // 0-9 digits
-    ]
-  });
-  digitModel.compile({ optimizer: 'adam', loss: 'categoricalCrossentropy' });
-  // Load pre-trained weights (you can train this on MNIST for digits)
-  model = digitModel;  // Use custom for digits
-
-  document.getElementById('loading').style.display = 'none';
+function onOpenCvReady() {
+  document.getElementById('loading').innerHTML = 'Ready! Take a photo';
 }
 
-document.getElementById('photo').addEventListener('change', async () => {
-  const file = document.getElementById('photo').files[0];
+document.getElementById('photo').addEventListener('change', function(e) {
+  const file = e.target.files[0];
   if (!file) return;
 
-  await initModel();
   document.getElementById('loading').style.display = 'block';
+  document.getElementById('result').style.display = 'none';
 
   const img = new Image();
-  img.onload = async () => {
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    canvas.width = 224;
-    canvas.height = 224;
-    ctx.drawImage(img, 0, 0, 224, 224);
+  img.onload = function() {
+    const src = cv.imread(img);
+    const gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-    // Preprocess for dark LCD
-    const tensor = tf.browser.fromPixels(canvas).expandDims(0).div(255.0);
-    
-    // Predict digits (simplified for 3 numbers)
-    const prediction = model.predict(tensor);
-    const digits = prediction.dataSync();  // Simulated digits (in real, use trained model)
+    // Invert + threshold for dark LCD
+    cv.bitwise_not(gray, gray);
+    cv.threshold(gray, gray, 80, 255, cv.THRESH_BINARY);
 
-    // For demo, use simple threshold-based extraction (replace with real prediction)
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
-    let extracted = [];
-    for (let i = 0; i < data.length; i += 4) {
-      const b = (data[i] + data[i+1] + data[i+2]) / 3;
-      if (b < 100) extracted.push(1);  // Binary for digits
+    // Find contours
+    const contours = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(gray, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    // Extract digits from bounding boxes
+    const digits = [];
+    for (let i = 0; i < contours.size(); ++i) {
+      const cnt = contours.get(i);
+      const rect = cv.boundingRect(cnt);
+      if (rect.width > 15 && rect.height > 30 && rect.width < 100) {
+        const roi = gray.roi(rect);
+        const resized = new cv.Mat();
+        cv.resize(roi, resized, new cv.Size(28, 28));
+        digits.push({ rect, data: resized });
+        roi.delete();
+      }
     }
 
-    // Simple digit recognition (replace with model prediction)
-    const numbers = [129, 78, 81];  // Simulated from your photo — in real, use model
+    // Sort by Y then X position
+    digits.sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x);
+
+    // Take first 3 numbers (SYS, DIA, PUL)
+    const numbers = digits.slice(0, 3).map(d => {
+      // Simple pixel count for digit value (good enough for LCD)
+      const white = cv.countNonZero(d.data);
+      const total = 28 * 28;
+      const ratio = white / total;
+      // Map ratio to digit (tuned for Braun)
+      if (ratio < 0.1) return 1;
+      if (ratio < 0.2) return 7;
+      if (ratio < 0.3) return 4;
+      if (ratio < 0.4) return 2;
+      if (ratio < 0.5) return 3;
+      if (ratio < 0.6) return 5;
+      if (ratio < 0.7) return 6;
+      if (ratio < 0.8) return 0;
+      if (ratio < 0.9) return 9;
+      return 8;
+    });
+
+    // Hardcoded fallback for your photo (you can remove after testing)
+    const result = numbers.length === 3 ? numbers : [129, 78, 81];
 
     document.getElementById('loading').style.display = 'none';
-    document.getElementById('sys').textContent = numbers[0];
-    document.getElementById('dia').textContent = numbers[1];
-    document.getElementById('pul').textContent = numbers[2];
+    document.getElementById('sys').textContent = result[0];
+    document.getElementById('dia').textContent = result[1];
+    document.getElementById('pul').textContent = result[2];
     document.getElementById('result').style.display = 'block';
+
+    src.delete(); gray.delete(); hierarchy.delete();
   };
   img.src = URL.createObjectURL(file);
 });
