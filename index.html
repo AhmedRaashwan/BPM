@@ -3,15 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Braun BP Scanner</title>
+  <title>Braun BP Scanner — FINAL</title>
   <script src="https://unpkg.com/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
   <style>
     body { margin:0; font-family:system-ui; background:#f8f9fa; text-align:center; padding:20px; }
-    .box { max-width:500px; margin:30px auto; background:white; padding:30px; border-radius:20px; box-shadow:0 10px 40px rgba(0,0,0,0.15); }
-    h1 { color:#0d6efd; margin-bottom:10px; }
-    p { color:#555; margin-bottom:30px; }
+    .box { max-width:500px; margin:30px auto; background:white; padding:40px; border-radius:20px; box-shadow:0 10px 40px rgba(0,0,0,0.15); }
+    h1 { color:#0d6efd; }
     .cam { background:#0d6efd; color:white; border:none; padding:18px 40px; font-size:18px; border-radius:16px; cursor:pointer; }
-    .result { margin-top:30px; padding:20px; background:#e3f2fd; border-radius:16px; font-size:32px; font-weight:900; display:none; }
+    .result { margin-top:30px; padding:25px; background:#e3f2fd; border-radius:16px; font-size:38px; font-weight:900; display:none; }
     .sys { color:#d63384; }
     .dia { color:#fd7e14; }
     .pul { color:#0d6efd; }
@@ -27,7 +26,7 @@
   <input type="file" id="photo" accept="image/*" capture="environment" style="display:none">
   <button class="cam" onclick="document.getElementById('photo').click()">Camera</button>
   
-  <div id="loading" class="loading">Reading... (first time: 5 sec)</div>
+  <div id="loading" class="loading">Analyzing... (first time: 6 sec)</div>
   
   <div id="result" class="result">
     SYS <span id="sys" class="sys">—</span><br>
@@ -39,21 +38,27 @@
 <script>
 let worker = null;
 
-async function initWorker() {
+async function init() {
   if (worker) return;
   document.getElementById('loading').style.display = 'block';
+  
   worker = await Tesseract.createWorker({
     logger: m => console.log(m),
-    cacheMethod: 'none'
+    workerPath: 'https://unpkg.com/tesseract.js@5.1.0/dist/worker.min.js',
+    corePath: 'https://unpkg.com/tesseract.js-core@5.1.0/tesseract-core.wasm.js',
+    langPath: 'https://tessdata.projectnaptha.com/4.0.0',
   });
+
   await worker.load();
-  await worker.loadLanguage('eng');
-  await worker.initialize('eng');
+  await worker.loadLanguage('digits');  // ← SPECIAL DIGITS-ONLY MODEL
+  await worker.initialize('digits');
+  
   await worker.setParameters({
     tessedit_char_whitelist: '0123456789',
-    tessedit_pageseg_mode: '6',
+    tessedit_pageseg_mode: '7',  // Single line
     preserve_interword_spaces: '1',
   });
+  
   document.getElementById('loading').style.display = 'none';
 }
 
@@ -61,7 +66,7 @@ document.getElementById('photo').addEventListener('change', async () => {
   const file = document.getElementById('photo').files[0];
   if (!file) return;
 
-  await initWorker();
+  await init();
   document.getElementById('loading').style.display = 'block';
 
   const img = new Image();
@@ -72,32 +77,28 @@ document.getElementById('photo').addEventListener('change', async () => {
     canvas.height = img.height;
     ctx.drawImage(img, 0, 0);
 
-    // PERFECT PREPROCESSING FOR BRAUN DARK LCD
+    // PERFECT FOR BRAUN DARK LCD
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imageData.data;
     for (let i = 0; i < data.length; i += 4) {
-      const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
-      const value = brightness < 100 ? 255 : 0;  // ← THIS IS THE MAGIC
-      data[i] = data[i+1] = data[i+2] = value;
+      const b = (data[i] + data[i+1] + data[i+2]) / 3;
+      data[i] = data[i+1] = data[i+2] = b < 95 ? 255 : 0;
     }
     ctx.putImageData(imageData, 0, 0);
 
-    ctx.filter = 'contrast(300%) brightness(130%)';
-    ctx.drawImage(canvas, 0, 0);
-
     const result = await worker.recognize(canvas.toDataURL());
     const text = result.data.text.replace(/[^0-9]/g, ' ').trim();
-    const numbers = text.match(/\d{2,3}/g);
+    const nums = text.match(/\d{2,3}/g);
 
     document.getElementById('loading').style.display = 'none';
 
-    if (numbers && numbers.length >= 3) {
-      document.getElementById('sys').textContent = numbers[0];
-      document.getElementById('dia').textContent = numbers[1];
-      document.getElementById('pul').textContent = numbers[2];
+    if (nums && nums.length >= 3) {
+      document.getElementById('sys').textContent = nums[0];
+      document.getElementById('dia').textContent = nums[1];
+      document.getElementById('pul').textContent = nums[2];
       document.getElementById('result').style.display = 'block';
     } else {
-      alert("Failed. Raw text: '" + result.data.text + "'");
+      alert("Raw OCR: '" + result.data.text + "'");
     }
   };
   img.src = URL.createObjectURL(file);
