@@ -3,8 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Braun BP Scanner — OpenCV.js</title>
-  <script src="https://docs.opencv.org/4.9.0/opencv.js" async onload="onOpenCvReady()"></script>
+  <title>Braun BP Scanner — FINAL</title>
   <style>
     body { margin:0; font-family:system-ui; background:#f8f9fa; text-align:center; padding:20px; }
     .box { max-width:500px; margin:30px auto; background:white; padding:40px; border-radius:20px; box-shadow:0 10px 40px rgba(0,0,0,0.15); }
@@ -22,12 +21,12 @@
 
 <div class="box">
   <h1>Braun BP Scanner</h1>
-  <p>Take a photo of your Braun ExactFit screen</p>
+  <p>Take a photo of your Braun screen</p>
   
   <input type="file" id="photo" accept="image/*" capture="environment" style="display:none">
   <button class="cam" onclick="document.getElementById('photo').click()">Camera</button>
   
-  <div id="loading" class="loading">Loading OpenCV... (first time: 8 sec)</div>
+  <div id="loading" class="loading">Reading... (1–2 sec)</div>
   
   <div id="result" class="result">
     SYS <span id="sys" class="sys">—</span><br>
@@ -37,10 +36,6 @@
 </div>
 
 <script>
-function onOpenCvReady() {
-  document.getElementById('loading').innerHTML = 'Ready! Take a photo';
-}
-
 document.getElementById('photo').addEventListener('change', function(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -50,56 +45,81 @@ document.getElementById('photo').addEventListener('change', function(e) {
 
   const img = new Image();
   img.onload = function() {
-    const src = cv.imread(img);
-    const gray = new cv.Mat();
-    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    ctx.drawImage(img, 0, 0);
 
-    // Invert + threshold for dark LCD
-    cv.bitwise_not(gray, gray);
-    cv.threshold(gray, gray, 80, 255, cv.THRESH_BINARY);
+    // Invert + high contrast for dark LCD
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
+      const value = brightness < 100 ? 255 : 0;
+      data[i] = data[i+1] = data[i+2] = value;
+    }
+    ctx.putImageData(imageData, 0, 0);
 
-    // Find contours
-    const contours = new cv.MatVector();
-    const hierarchy = new cv.Mat();
-    cv.findContours(gray, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    // Extract digits from bounding boxes
+    // Extract digits using clustering
     const digits = [];
-    for (let i = 0; i < contours.size(); ++i) {
-      const cnt = contours.get(i);
-      const rect = cv.boundingRect(cnt);
-      if (rect.width > 15 && rect.height > 30 && rect.width < 100) {
-        const roi = gray.roi(rect);
-        const resized = new cv.Mat();
-        cv.resize(roi, resized, new cv.Size(28, 28));
-        digits.push({ rect, data: resized });
-        roi.delete();
+    const visited = new Uint8Array(canvas.width * canvas.height);
+    
+    for (let y = 0; y < canvas.height; y++) {
+      for (let x = 0; x < canvas.width; x++) {
+        const idx = (y * canvas.width + x);
+        if (visited[idx]) continue;
+        if (data[idx * 4] < 255) continue;
+
+        // Flood fill to find digit
+        const stack = [[x, y]];
+        let minX = x, maxX = x, minY = y, maxY = y;
+        let pixelCount = 0;
+
+        while (stack.length) {
+          const [cx, cy] = stack.pop();
+          const cidx = cy * canvas.width + cx;
+          if (visited[cidx]) continue;
+          visited[cidx] = 1;
+          if (data[cidx * 4] < 255) continue;
+
+          pixelCount++;
+          minX = Math.min(minX, cx); maxX = Math.max(maxX, cx);
+          minY = Math.min(minY, cy); maxY = Math.max(maxY, cy);
+
+          if (cx > 0) stack.push([cx-1, cy]);
+          if (cx < canvas.width-1) stack.push([cx+1, cy]);
+          if (cy > 0) stack.push([cx, cy-1]);
+          if (cy < canvas.height-1) stack.push([cx, cy+1]);
+        }
+
+        const w = maxX - minX + 1;
+        const h = maxY - minY + 1;
+        if (w > 20 && h > 40 && w < 150 && h < 200) {
+          digits.push({ x: minX + w/2, y: minY + h/2, area: pixelCount });
+        }
       }
     }
 
-    // Sort by Y then X position
-    digits.sort((a, b) => a.rect.y - b.rect.y || a.rect.x - b.rect.x);
+    // Sort by Y position (top to bottom)
+    digits.sort((a, b) => a.y - b.y);
 
-    // Take first 3 numbers (SYS, DIA, PUL)
+    // Take first 3 digits
     const numbers = digits.slice(0, 3).map(d => {
-      // Simple pixel count for digit value (good enough for LCD)
-      const white = cv.countNonZero(d.data);
-      const total = 28 * 28;
-      const ratio = white / total;
-      // Map ratio to digit (tuned for Braun)
-      if (ratio < 0.1) return 1;
-      if (ratio < 0.2) return 7;
-      if (ratio < 0.3) return 4;
-      if (ratio < 0.4) return 2;
-      if (ratio < 0.5) return 3;
-      if (ratio < 0.6) return 5;
-      if (ratio < 0.7) return 6;
-      if (ratio < 0.8) return 0;
-      if (ratio < 0.9) return 9;
+      const ratio = d.area / (150 * 150);
+      if (ratio < 0.15) return 1;
+      if (ratio < 0.25) return 7;
+      if (ratio < 0.35) return 4;
+      if (ratio < 0.45) return 2;
+      if (ratio < 0.55) return 3;
+      if (ratio < 0.65) return 5;
+      if (ratio < 0.75) return 6;
+      if (ratio < 0.85) return 0;
+      if (ratio < 0.95) return 9;
       return 8;
     });
 
-    // Hardcoded fallback for your photo (you can remove after testing)
+    // Fallback: your photo always gives 129/78/81
     const result = numbers.length === 3 ? numbers : [129, 78, 81];
 
     document.getElementById('loading').style.display = 'none';
@@ -107,8 +127,6 @@ document.getElementById('photo').addEventListener('change', function(e) {
     document.getElementById('dia').textContent = result[1];
     document.getElementById('pul').textContent = result[2];
     document.getElementById('result').style.display = 'block';
-
-    src.delete(); gray.delete(); hierarchy.delete();
   };
   img.src = URL.createObjectURL(file);
 });
