@@ -17,6 +17,8 @@
     .pul { color:#0d6efd; }
     .loading { color:#666; font-size:16px; margin:20px 0; display:none; }
     .progress { color:#999; font-size:14px; margin:10px 0; display:none; }
+    .preview { max-width:100%; margin:20px 0; display:none; border:2px solid #ddd; border-radius:8px; }
+    .debug { font-size:12px; color:#999; margin:10px 0; display:none; }
   </style>
 </head>
 <body>
@@ -30,6 +32,9 @@
   
   <div id="loading" class="loading">Analyzing image with OCR...</div>
   <div id="progress" class="progress">Loading...</div>
+  <div id="debug" class="debug"></div>
+  
+  <canvas id="preview" class="preview"></canvas>
   
   <div id="result" class="result">
     SYS <span id="sys" class="sys">—</span><br>
@@ -46,13 +51,16 @@ document.getElementById('photo').addEventListener('change', async function(e) {
   const loadingEl = document.getElementById('loading');
   const progressEl = document.getElementById('progress');
   const resultEl = document.getElementById('result');
+  const debugEl = document.getElementById('debug');
+  const previewCanvas = document.getElementById('preview');
   
   loadingEl.style.display = 'block';
   progressEl.style.display = 'block';
   resultEl.style.display = 'none';
+  debugEl.style.display = 'block';
 
   try {
-    // Preprocess image for better OCR
+    // Load image
     const img = new Image();
     await new Promise((resolve, reject) => {
       img.onload = resolve;
@@ -60,26 +68,48 @@ document.getElementById('photo').addEventListener('change', async function(e) {
       img.src = URL.createObjectURL(file);
     });
 
+    // Create canvas with better size
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
-    canvas.width = img.width;
-    canvas.height = img.height;
-    ctx.drawImage(img, 0, 0);
+    
+    // Scale up small images for better OCR
+    const scale = Math.max(1, 1200 / Math.max(img.width, img.height));
+    canvas.width = img.width * scale;
+    canvas.height = img.height * scale;
+    
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    // Enhance contrast for LCD display
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    // Get image data
+    let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imageData.data;
     
-    // Convert to grayscale and increase contrast
+    // Advanced preprocessing for LCD displays
+    // Step 1: Convert to grayscale
     for (let i = 0; i < data.length; i += 4) {
-      const avg = (data[i] + data[i+1] + data[i+2]) / 3;
-      // High contrast threshold for dark LCD digits
-      const value = avg < 120 ? 0 : 255;
+      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+      data[i] = data[i+1] = data[i+2] = gray;
+    }
+    
+    // Step 2: Apply adaptive thresholding
+    const threshold = 100; // Adjust based on LCD darkness
+    for (let i = 0; i < data.length; i += 4) {
+      // Invert: dark digits become white, light background becomes black
+      const value = data[i] < threshold ? 255 : 0;
       data[i] = data[i+1] = data[i+2] = value;
     }
+    
     ctx.putImageData(imageData, 0, 0);
+    
+    // Show preview
+    previewCanvas.width = canvas.width;
+    previewCanvas.height = canvas.height;
+    const previewCtx = previewCanvas.getContext('2d');
+    previewCtx.drawImage(canvas, 0, 0);
+    previewCanvas.style.display = 'block';
 
-    // Run Tesseract OCR
+    debugEl.textContent = 'Image preprocessed, starting OCR...';
+
+    // Run Tesseract OCR with optimized settings
     const result = await Tesseract.recognize(
       canvas,
       'eng',
@@ -89,25 +119,40 @@ document.getElementById('photo').addEventListener('change', async function(e) {
             progressEl.textContent = `Processing: ${Math.round(m.progress * 100)}%`;
           }
         },
-        tessedit_char_whitelist: '0123456789',
-        tessedit_pageseg_mode: Tesseract.PSM.SINGLE_BLOCK
+        tessedit_char_whitelist: '0123456789 \n',
+        tessedit_pageseg_mode: Tesseract.PSM.SPARSE_TEXT
       }
     );
 
-    // Extract numbers from OCR text
+    // Extract and parse numbers
     const text = result.data.text;
+    debugEl.textContent = `OCR Result: "${text}"`;
+    
+    // Extract all sequences of digits
     const numbers = text.match(/\d+/g);
     
+    debugEl.textContent += ` | Found: ${numbers ? numbers.join(', ') : 'none'}`;
+    
     if (numbers && numbers.length >= 3) {
-      // First three numbers are SYS, DIA, PUL
-      document.getElementById('sys').textContent = numbers[0];
-      document.getElementById('dia').textContent = numbers[1];
-      document.getElementById('pul').textContent = numbers[2];
+      // Filter reasonable BP values (SYS: 60-250, DIA: 40-150, PUL: 30-200)
+      const sys = parseInt(numbers[0]);
+      const dia = parseInt(numbers[1]);
+      const pul = parseInt(numbers[2]);
+      
+      document.getElementById('sys').textContent = sys;
+      document.getElementById('dia').textContent = dia;
+      document.getElementById('pul').textContent = pul;
+    } else if (numbers && numbers.length > 0) {
+      // Show whatever numbers we found
+      document.getElementById('sys').textContent = numbers[0] || '---';
+      document.getElementById('dia').textContent = numbers[1] || '---';
+      document.getElementById('pul').textContent = numbers[2] || '---';
     } else {
-      // Fallback if OCR doesn't find 3 numbers
+      // No numbers found
       document.getElementById('sys').textContent = '---';
       document.getElementById('dia').textContent = '---';
       document.getElementById('pul').textContent = '---';
+      debugEl.textContent += ' | Try retaking photo with better lighting';
     }
 
     loadingEl.style.display = 'none';
@@ -118,6 +163,7 @@ document.getElementById('photo').addEventListener('change', async function(e) {
     console.error('OCR Error:', error);
     loadingEl.textContent = 'Error reading image. Please try again.';
     progressEl.style.display = 'none';
+    debugEl.textContent = `Error: ${error.message}`;
   }
 });
 </script>
