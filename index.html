@@ -3,8 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Braun BP Scanner — Multi-Method OCR</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
+  <title>Braun BP Scanner — 7-Segment Recognition</title>
   <style>
     body { margin:0; font-family:system-ui; background:#f8f9fa; text-align:center; padding:20px; }
     .box { max-width:500px; margin:30px auto; background:white; padding:40px; border-radius:20px; box-shadow:0 10px 40px rgba(0,0,0,0.15); }
@@ -16,10 +15,8 @@
     .dia { color:#fd7e14; }
     .pul { color:#0d6efd; }
     .loading { color:#666; font-size:16px; margin:20px 0; display:none; }
-    .progress { color:#999; font-size:14px; margin:10px 0; display:none; }
-    .previews { display:none; margin:20px 0; }
-    .preview-img { max-width:100%; margin:10px 0; border:2px solid #ddd; border-radius:8px; }
-    .debug { font-size:12px; color:#999; margin:10px 0; background:#f8f9fa; padding:10px; border-radius:8px; display:none; white-space:pre-wrap; text-align:left; max-height:200px; overflow-y:auto; }
+    .preview { max-width:100%; margin:20px 0; display:none; border:2px solid #ddd; border-radius:8px; }
+    .debug { font-size:12px; color:#999; margin:10px 0; background:#f8f9fa; padding:10px; border-radius:8px; display:none; white-space:pre-wrap; text-align:left; max-height:300px; overflow-y:auto; }
   </style>
 </head>
 <body>
@@ -31,15 +28,10 @@
   <input type="file" id="photo" accept="image/*" capture="environment" style="display:none">
   <button class="cam" onclick="document.getElementById('photo').click()">Camera</button>
   
-  <div id="loading" class="loading">Analyzing image with OCR...</div>
-  <div id="progress" class="progress">Loading...</div>
+  <div id="loading" class="loading">Processing image...</div>
   <div id="debug" class="debug"></div>
   
-  <div id="previews" class="previews">
-    <canvas id="preview1" class="preview-img"></canvas>
-    <canvas id="preview2" class="preview-img"></canvas>
-    <canvas id="preview3" class="preview-img"></canvas>
-  </div>
+  <canvas id="preview" class="preview"></canvas>
   
   <div id="result" class="result">
     SYS <span id="sys" class="sys">—</span><br>
@@ -49,60 +41,73 @@
 </div>
 
 <script>
-function preprocessImage(img, method) {
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
+// 7-segment patterns for digits 0-9
+const SEGMENTS = {
+  0: [1,1,1,1,1,1,0], // top, top-right, bottom-right, bottom, bottom-left, top-left, middle
+  1: [0,1,1,0,0,0,0],
+  2: [1,1,0,1,1,0,1],
+  3: [1,1,1,1,0,0,1],
+  4: [0,1,1,0,0,1,1],
+  5: [1,0,1,1,0,1,1],
+  6: [1,0,1,1,1,1,1],
+  7: [1,1,1,0,0,0,0],
+  8: [1,1,1,1,1,1,1],
+  9: [1,1,1,1,0,1,1]
+};
+
+function analyzeSegments(ctx, x, y, w, h) {
+  // Define 7 regions for a 7-segment display
+  const regions = [
+    {name: 'top', x: x + w*0.2, y: y, width: w*0.6, height: h*0.15},
+    {name: 'top-right', x: x + w*0.7, y: y + h*0.05, width: w*0.25, height: h*0.4},
+    {name: 'bottom-right', x: x + w*0.7, y: y + h*0.55, width: w*0.25, height: h*0.4},
+    {name: 'bottom', x: x + w*0.2, y: y + h*0.85, width: w*0.6, height: h*0.15},
+    {name: 'bottom-left', x: x + w*0.05, y: y + h*0.55, width: w*0.25, height: h*0.4},
+    {name: 'top-left', x: x + w*0.05, y: y + h*0.05, width: w*0.25, height: h*0.4},
+    {name: 'middle', x: x + w*0.2, y: y + h*0.425, width: w*0.6, height: h*0.15}
+  ];
   
-  // Scale up for better OCR
-  const scale = Math.max(2, 1500 / Math.max(img.width, img.height));
-  canvas.width = img.width * scale;
-  canvas.height = img.height * scale;
+  const pattern = [];
   
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imageData.data;
-  
-  if (method === 'invert-dark') {
-    // Method 1: Invert dark pixels (for dark LCD)
-    for (let i = 0; i < data.length; i += 4) {
-      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-      const value = gray < 80 ? 255 : 0;
-      data[i] = data[i+1] = data[i+2] = value;
+  for (const region of regions) {
+    let darkPixels = 0;
+    let totalPixels = 0;
+    
+    for (let ry = 0; ry < region.height; ry++) {
+      for (let rx = 0; rx < region.width; rx++) {
+        const px = Math.floor(region.x + rx);
+        const py = Math.floor(region.y + ry);
+        const i = (py * ctx.canvas.width + px) * 4;
+        const brightness = ctx.getImageData(px, py, 1, 1).data[0];
+        
+        if (brightness > 200) darkPixels++; // White pixel (inverted)
+        totalPixels++;
+      }
     }
-  } else if (method === 'invert-medium') {
-    // Method 2: Invert with medium threshold
-    for (let i = 0; i < data.length; i += 4) {
-      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-      const value = gray < 120 ? 255 : 0;
-      data[i] = data[i+1] = data[i+2] = value;
+    
+    const ratio = darkPixels / totalPixels;
+    pattern.push(ratio > 0.3 ? 1 : 0); // Segment is "on" if >30% lit
+  }
+  
+  return pattern;
+}
+
+function matchPattern(pattern) {
+  let bestMatch = -1;
+  let bestScore = -1;
+  
+  for (let digit = 0; digit <= 9; digit++) {
+    let score = 0;
+    for (let i = 0; i < 7; i++) {
+      if (pattern[i] === SEGMENTS[digit][i]) score++;
     }
-  } else if (method === 'normal') {
-    // Method 3: Normal threshold (don't invert)
-    for (let i = 0; i < data.length; i += 4) {
-      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-      const value = gray > 120 ? 255 : 0;
-      data[i] = data[i+1] = data[i+2] = value;
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = digit;
     }
   }
   
-  ctx.putImageData(imageData, 0, 0);
-  return canvas;
-}
-
-async function tryOCR(canvas, method) {
-  const worker = await Tesseract.createWorker('eng');
-  
-  await worker.setParameters({
-    tessedit_char_whitelist: '0123456789',
-    tessedit_pageseg_mode: Tesseract.PSM.AUTO
-  });
-  
-  const { data: { text } } = await worker.recognize(canvas);
-  await worker.terminate();
-  
-  const numbers = text.match(/\d+/g) || [];
-  return { method, text, numbers };
+  return bestScore >= 5 ? bestMatch : -1; // Need at least 5/7 segments match
 }
 
 document.getElementById('photo').addEventListener('change', async function(e) {
@@ -110,20 +115,16 @@ document.getElementById('photo').addEventListener('change', async function(e) {
   if (!file) return;
 
   const loadingEl = document.getElementById('loading');
-  const progressEl = document.getElementById('progress');
   const resultEl = document.getElementById('result');
   const debugEl = document.getElementById('debug');
-  const previewsEl = document.getElementById('previews');
+  const previewCanvas = document.getElementById('preview');
   
   loadingEl.style.display = 'block';
-  progressEl.style.display = 'block';
   resultEl.style.display = 'none';
   debugEl.style.display = 'block';
-  previewsEl.style.display = 'block';
   debugEl.textContent = 'Loading image...';
 
   try {
-    // Load image
     const img = new Image();
     await new Promise((resolve, reject) => {
       img.onload = resolve;
@@ -131,63 +132,138 @@ document.getElementById('photo').addEventListener('change', async function(e) {
       img.src = URL.createObjectURL(file);
     });
 
-    debugEl.textContent = `Image: ${img.width}x${img.height}\n\nTrying multiple preprocessing methods...\n`;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    // Scale up
+    const scale = Math.max(2, 1800 / Math.max(img.width, img.height));
+    canvas.width = img.width * scale;
+    canvas.height = img.height * scale;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    // Try 3 different preprocessing methods
-    const methods = ['invert-dark', 'invert-medium', 'normal'];
+    debugEl.textContent = `Image: ${canvas.width}x${canvas.height}\n`;
+
+    // Convert to binary (inverted for dark LCD)
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    
+    for (let i = 0; i < data.length; i += 4) {
+      const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+      const value = gray < 100 ? 255 : 0;
+      data[i] = data[i+1] = data[i+2] = value;
+    }
+    ctx.putImageData(imageData, 0, 0);
+    
+    // Show preview
+    previewCanvas.width = canvas.width;
+    previewCanvas.height = canvas.height;
+    const previewCtx = previewCanvas.getContext('2d');
+    previewCtx.drawImage(canvas, 0, 0);
+    previewCanvas.style.display = 'block';
+
+    // Find connected components (digit blobs)
+    const visited = new Uint8Array(canvas.width * canvas.height);
+    const digits = [];
+    
+    for (let y = 0; y < canvas.height; y++) {
+      for (let x = 0; x < canvas.width; x++) {
+        const idx = y * canvas.width + x;
+        if (visited[idx]) continue;
+        if (data[idx * 4] < 200) continue;
+
+        // Flood fill
+        const stack = [[x, y]];
+        let minX = x, maxX = x, minY = y, maxY = y;
+        let pixelCount = 0;
+
+        while (stack.length) {
+          const [cx, cy] = stack.pop();
+          if (cx < 0 || cx >= canvas.width || cy < 0 || cy >= canvas.height) continue;
+          
+          const cidx = cy * canvas.width + cx;
+          if (visited[cidx]) continue;
+          visited[cidx] = 1;
+          if (data[cidx * 4] < 200) continue;
+
+          pixelCount++;
+          minX = Math.min(minX, cx);
+          maxX = Math.max(maxX, cx);
+          minY = Math.min(minY, cy);
+          maxY = Math.max(maxY, cy);
+
+          stack.push([cx-1, cy], [cx+1, cy], [cx, cy-1], [cx, cy+1]);
+        }
+
+        const w = maxX - minX + 1;
+        const h = maxY - minY + 1;
+        
+        // Filter for digit-sized components
+        if (w > 15 && h > 30 && w < 300 && h < 500 && h > w && pixelCount > 100) {
+          digits.push({ x: minX, y: minY, w, h, centerY: minY + h/2, pixels: pixelCount });
+        }
+      }
+    }
+
+    debugEl.textContent += `Found ${digits.length} digit candidates\n`;
+
+    // Sort by vertical position
+    digits.sort((a, b) => a.centerY - b.centerY);
+    
+    // Group into 3 rows (SYS, DIA, PUL)
+    const rows = [];
+    let currentRow = [];
+    let lastY = -1000;
+    
+    for (const digit of digits) {
+      if (digit.centerY - lastY > 100) {
+        if (currentRow.length > 0) {
+          rows.push(currentRow.sort((a, b) => a.x - b.x));
+        }
+        currentRow = [];
+      }
+      currentRow.push(digit);
+      lastY = digit.centerY;
+    }
+    if (currentRow.length > 0) {
+      rows.push(currentRow.sort((a, b) => a.x - b.x));
+    }
+
+    debugEl.textContent += `Grouped into ${rows.length} rows\n\n`;
+
+    // Recognize each digit using 7-segment analysis
     const results = [];
     
-    for (let i = 0; i < methods.length; i++) {
-      const method = methods[i];
-      progressEl.textContent = `Testing method ${i+1}/3: ${method}...`;
+    for (let r = 0; r < Math.min(3, rows.length); r++) {
+      const row = rows[r];
+      let number = '';
       
-      const canvas = preprocessImage(img, method);
+      for (const digit of row) {
+        const pattern = analyzeSegments(ctx, digit.x, digit.y, digit.w, digit.h);
+        const recognized = matchPattern(pattern);
+        
+        if (recognized >= 0) {
+          number += recognized;
+        }
+        
+        debugEl.textContent += `Row ${r+1}, Digit: pattern=${pattern.join('')} → ${recognized >= 0 ? recognized : '?'}\n`;
+      }
       
-      // Show preview
-      const previewCanvas = document.getElementById(`preview${i+1}`);
-      previewCanvas.width = canvas.width;
-      previewCanvas.height = canvas.height;
-      const previewCtx = previewCanvas.getContext('2d');
-      previewCtx.drawImage(canvas, 0, 0);
-      
-      // Try OCR
-      const result = await tryOCR(canvas, method);
-      results.push(result);
-      
-      debugEl.textContent += `\n${method}:\n  Text: "${result.text.substring(0, 100)}"\n  Numbers: [${result.numbers.join(', ')}]`;
-    }
-    
-    // Find best result (most numbers found, ideally 3+)
-    results.sort((a, b) => b.numbers.length - a.numbers.length);
-    const best = results[0];
-    
-    debugEl.textContent += `\n\n✓ Best method: ${best.method} with ${best.numbers.length} numbers`;
-    
-    if (best.numbers.length >= 3) {
-      document.getElementById('sys').textContent = best.numbers[0];
-      document.getElementById('dia').textContent = best.numbers[1];
-      document.getElementById('pul').textContent = best.numbers[2];
-    } else if (best.numbers.length > 0) {
-      document.getElementById('sys').textContent = best.numbers[0] || '---';
-      document.getElementById('dia').textContent = best.numbers[1] || '---';
-      document.getElementById('pul').textContent = best.numbers[2] || '---';
-      debugEl.textContent += '\n\n⚠️ Found fewer than 3 numbers';
-    } else {
-      document.getElementById('sys').textContent = '---';
-      document.getElementById('dia').textContent = '---';
-      document.getElementById('pul').textContent = '---';
-      debugEl.textContent += '\n\n❌ No numbers detected in any method';
+      results.push(number);
+      debugEl.textContent += `Row ${r+1} result: ${number || 'none'}\n\n`;
     }
 
+    // Display results
+    document.getElementById('sys').textContent = results[0] || '---';
+    document.getElementById('dia').textContent = results[1] || '---';
+    document.getElementById('pul').textContent = results[2] || '---';
+
     loadingEl.style.display = 'none';
-    progressEl.style.display = 'none';
     resultEl.style.display = 'block';
 
   } catch (error) {
-    console.error('OCR Error:', error);
-    loadingEl.textContent = 'Error reading image. Please try again.';
-    progressEl.style.display = 'none';
-    debugEl.textContent += `\n\n❌ Error: ${error.message}`;
+    console.error('Error:', error);
+    loadingEl.textContent = 'Error processing image';
+    debugEl.textContent += `\n❌ Error: ${error.message}`;
   }
 });
 </script>
